@@ -1,0 +1,143 @@
+name: Render "Inside a Star"
+
+# Run from the Actions tab -> "Render Inside a Star" -> Run workflow.
+# Pick a format. Frames are split into chunks that render in parallel (software WebGL is slow),
+# then stitched together with the soundtrack. Download the result from the run's Artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      format:
+        description: 'What to render'
+        type: choice
+        default: '1080p'
+        options: ['1080p', '4k', 'shorts', 'all']
+      voice:
+        description: 'Narration voice (edge-tts name). en-IN-PrabhatNeural = Indian English male, en-IN-NeerjaNeural = female'
+        type: string
+        default: 'en-IN-PrabhatNeural'
+      chunk_1080p:
+        description: 'Frames per 1080p job'
+        type: string
+        default: '400'
+      chunk_4k:
+        description: 'Frames per 4K job'
+        type: string
+        default: '240'
+
+jobs:
+  audio:
+    name: Narration + music
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      voice: ${{ steps.v.outputs.voice }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: npm ci
+      - name: Install audio tools
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y ffmpeg espeak-ng
+          pip install numpy scipy edge-tts
+      - name: Export script, synthesize voice, compose music, mix
+        env:
+          VOICE: ${{ inputs.voice }}
+        run: |
+          node scripts/export-script.mjs
+          python3 scripts/tts.py
+          python3 scripts/music.py
+          python3 scripts/mix.py
+          node scripts/shorts-audio.mjs
+      - id: v
+        run: echo "voice=$(cat build/audio/voice.txt)" >> "$GITHUB_OUTPUT"
+      - name: Warn if the neural voice was unavailable
+        if: steps.v.outputs.voice != 'edge-tts'
+        run: echo "::warning::Neural voice unavailable, used '${{ steps.v.outputs.voice }}'. Re-run later for the full-quality voice."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: audio
+          path: build/audio
+          retention-days: 7
+
+  plan:
+    name: Plan render jobs
+    needs: audio
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.p.outputs.matrix }}
+      formats: ${{ steps.p.outputs.formats }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { name: audio, path: build/audio }
+      - id: p
+        run: |
+          F="${{ inputs.format }}"
+          if [ "$F" = "all" ]; then F="1080p,4k,shorts"; fi
+          node scripts/plan.mjs --formats "$F" --chunk1080 "${{ inputs.chunk_1080p }}" --chunk4k "${{ inputs.chunk_4k }}"
+
+  render:
+    name: ${{ matrix.name }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Install ffmpeg
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
+      - uses: actions/download-artifact@v4
+        with: { name: audio, path: build/audio }
+      - name: Render frames ${{ matrix.start }}-${{ matrix.end }}
+        run: node scripts/render.mjs --format ${{ matrix.format }} --start ${{ matrix.start }} --end ${{ matrix.end }} --out build/chunks/${{ matrix.name }}.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.name }}
+          path: build/chunks/${{ matrix.name }}.mp4
+          retention-days: 3
+
+  assemble:
+    name: Assemble ${{ matrix.format }}
+    needs: [plan, render]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        format: ${{ fromJson(needs.plan.outputs.formats) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - name: Install ffmpeg
+        run: sudo apt-get update -y && sudo apt-get install -y ffmpeg
+      - uses: actions/download-artifact@v4
+        with: { name: audio, path: build/audio }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-${{ matrix.format }}_*
+          path: build/chunks
+          merge-multiple: true
+      - name: Join chunks, add soundtrack, write captions
+        run: node scripts/assemble.mjs --format ${{ matrix.format }}
+      - name: Thumbnail
+        if: matrix.format == '1080p' || matrix.format == '4k'
+        run: node scripts/render.mjs --format 1080p --thumb dist/thumbnail.jpg
+      - name: Copy upload text
+        run: cp docs/YOUTUBE_DESCRIPTION.md dist/ || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inside-a-star-${{ matrix.format }}
+          path: dist
+          retention-days: 14

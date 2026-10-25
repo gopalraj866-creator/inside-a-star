@@ -1,0 +1,19 @@
+{
+  "name": "inside-a-star",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Journey Inside a Star - 8 minute Three.js/WebGL documentary for Technical Talk India",
+  "type": "module",
+  "scripts": {
+    "preview": "node scripts/serve.mjs",
+    "render": "node scripts/render.mjs",
+    "test:frames": "node scripts/render.mjs --stills"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/rajdhani": "^5.3.0",
+    "@sparticuz/chromium": "^153.0.0",
+    "puppeteer-core": "^24.0.0",
+    "three": "0.170.0"
+  }
+}
